@@ -11,10 +11,20 @@ from lcb_runner.lm_styles import LMStyle
 from lcb_runner.runner.base_runner import BaseRunner
 
 
+OPEN_AI_KEY_FILEPATH = "../open-ai-key.txt"
+
+
 class OpenAIRunner(BaseRunner):
-    client = OpenAI(
-        api_key=os.getenv("OPENAI_KEY"),
-    )
+
+    with open(OPEN_AI_KEY_FILEPATH, 'r') as file:
+        open_ai_key = file.read().strip()  # Reads the entire file content as a single string
+        client = OpenAI(
+            api_key=open_ai_key
+        )
+
+    # client = OpenAI(
+    #     api_key=os.getenv("OPENAI_KEY"),
+    # )
 
     def __init__(self, args, model):
         super().__init__(args, model)

@@ -87,6 +87,7 @@ class CodeGenerationProblem:
             "difficulty": self.difficulty.value,
             "output_list": output_list,
             "code_list": code_list,
+            # "test": self.get_evaluation_sample()
         }
 
     def insert_output_evaluation(
@@ -119,9 +120,12 @@ class CodeGenerationProblem:
                 }
             ),
         }
+    
+    def get_test_cases(self):
+        return self.public_test_cases + self.private_test_cases
 
 
-def load_code_generation_dataset(release_version="release_v1", start_date=None, end_date=None) -> list[CodeGenerationProblem]:
+def  load_code_generation_dataset(release_version="release_v1", start_date=None, end_date=None) -> list[CodeGenerationProblem]:
     dataset = load_dataset("livecodebench/code_generation_lite", split="test", version_tag=release_version, trust_remote_code=True)
     dataset = [CodeGenerationProblem(**p) for p in dataset]  # type: ignore
     if start_date is not None:

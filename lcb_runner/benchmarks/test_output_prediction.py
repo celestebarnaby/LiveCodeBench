@@ -42,6 +42,7 @@ class TestOutputPredictionProblem:
             "test_id": self.test_id,
             "function_name": self.function_name,
             "starter_code": self.starter_code,
+            # "tests" : self.get_evaluation_sample()
         }
 
     def insert_output_evaluation(
