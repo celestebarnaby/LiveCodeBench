@@ -34,12 +34,21 @@ class PromptConstants:
 
     FORMATTING_MESSAGE_WITH_STARTER_CODE = "You will use the following starter code to write the solution to the problem and enclose your code within delimiters."
 
-    FORMATTING_WITHOUT_STARTER_CODE = "Read the inputs from stdin solve the problem and write the answer to stdout (do not directly test on the sample inputs). Enclose your code within delimiters as follows. Ensure that when the python program runs, it reads the inputs, runs the algorithm and writes output to STDOUT."
-
+    # FORMATTING_WITHOUT_STARTER_CODE = "Read the inputs from stdin solve the problem and write the answer to stdout (do not directly test on the sample inputs). Enclose your code within delimiters as follows. Ensure that when the python program runs, it reads the inputs, runs the algorithm and writes output to STDOUT."
+    FORMATTING_WITHOUT_STARTER_CODE = (
+"Write a pure function `solve_task`.\n"
+"- Do NOT read from stdin, do NOT write to stdout, do NOT call `solve_task`.\n"
+"- No top-level side effects (no global execution).\n"
+"- Assume the input is a single test case."
+"- Return the exact output.\n"
+"- You may define helper functions, but `solve_task` must be the public entry point."
+    )
 
 def get_generic_question_template_answer(question: CodeGenerationProblem):
     prompt = f"### Question:\n{question.question_content}\n\n"
-    if question.starter_code:
+    # if question.starter_code:
+    # TODO: decide what to do for benchmarks with starter code
+    if False:
         prompt += (
             f"### Format: {PromptConstants.FORMATTING_MESSAGE_WITH_STARTER_CODE}\n"
         )

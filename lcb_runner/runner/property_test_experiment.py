@@ -10,10 +10,13 @@ import ast
 import time
 import statistics
 import shutil
+import csv
+from pathlib import Path
 
 from tqdm import tqdm
 from openai import OpenAI
 from dataclasses import dataclass
+from sklearn.metrics import f1_score
 from typing import Any, Dict, List, Optional, Tuple
 
 from lcb_runner.runner.parser import get_args
@@ -41,13 +44,25 @@ class EvalResult:
     error_detail: Optional[str] = None
 
 
+WRAPPER = """\
+import sys
+{model_code}
+
+def _main():
+    sys.stdout.write(solve_io(sys.stdin.read()))
+
+if __name__ == "__main__":
+    _main()
+"""
+
+
 def extract_property_test_benchmarks():
     args = get_args()
 
     model = LanguageModelStore[args.model]
     benchmarks, format_prompt = build_prompt_benchmark(args)
 
-    benchmarks = benchmarks[:20]
+    benchmarks = benchmarks[:10]
     # NUM_BENCHMARKS = 10
     # random.seed(123)
     # benchmarks = random.sample(benchmarks, NUM_BENCHMARKS)
@@ -57,7 +72,9 @@ def extract_property_test_benchmarks():
         os.remove(output_path)
 
     runner = build_runner(args, model)
+    # TODO: add I/O wrapper to results
     results: list[list[str]] = runner.run_main(benchmarks, format_prompt)
+    print(results[0])
 
     combined_results = combine_results(
         args.scenario, results, model, args.cot_code_execution
@@ -899,7 +916,134 @@ def extract_property_test_benchmarks2() -> None:
     print(f"Wrote {len(curated)} benchmarks to {output_path}")
 
 
+def generate_property_tests(client, prompt: str, model_name: str) -> str:
+    """
+    Generate Hypothesis-based property tests for the function `entry_point`
+    described by the HumanEval prompt.
+    """
+    user_msg = f"""
+Here is a description of a Python task:
+
+\"\"\"{prompt}\"\"\"
+
+The core logic of this task has been implemented in a function called `solve_task`.
+This function has the following properties:
+- Does NOT read from stdin, and does NOT write to stdout.
+- Has NO top-level side effects.
+- The input to the function is a single test case
+- Returns the exact output.
+
+Write a set of **Hypothesis property-based tests** for this function.
+
+Requirements:
+- Use `import hypothesis`. Do NOT import any other libraries.
+- Define a single function named `check`, and then call that function.
+- Call the function `solve_task` in your tests.
+- Do NOT redefine the function itself.
+- Only output Python test code, no explanations.
+"""
+
+    response = client.chat.completions.create(
+        model=model_name,
+        messages=[
+            {
+                "role": "system",
+                "content": (
+                    "You are an expert in property-based testing with Hypothesis. "
+                    "You write concise and correct Hypothesis tests."
+                ),
+            },
+            {"role": "user", "content": user_msg},
+        ],
+        # temperature=0.5,  # a bit more creativity for tests
+        max_completion_tokens=512,
+    )
+    return strip_code_fences(response.choices[0].message.content)
+
+
+ENTRY_POINT = "solve_task"
+
+def _make_property_test_harness(
+    solution_code: str,
+    property_tests_code: str,
+) -> str:
+    """
+    Combines:
+      - candidate solution (must define solve_io(stdin)->str)
+      - generated property tests (must define run_property_tests(solve_io)->bool OR raise AssertionError)
+    into an executable script.
+    """
+
+    return f"""\
+# --- Candidate solution ---
+{solution_code}
+
+# --- Generated property tests ---
+{property_tests_code}
+
+def __main():
+    # Support two conventions:
+    # (1) run_property_tests(solve_io) -> bool
+    # (2) run_property_tests(solve_io) does assertions and returns None
+    fn = {ENTRY_POINT}
+    try:
+        res = run_property_tests(fn)
+        if res is False:
+            raise AssertionError("run_property_tests returned False")
+        print("PASS")
+    except AssertionError as e:
+        print("FAIL")
+        raise
+    except Exception as e:
+        # Treat exceptions as failures (including generation errors)
+        print("FAIL")
+        raise
+
+if __name__ == "__main__":
+    __main()
+"""
+
+
+
+def solution_passes_property_tests(
+    solution_code: str,
+    property_tests_code: str,
+
+) -> bool:
+    harness = _make_property_test_harness(solution_code, property_tests_code)
+    rc, out, err = _run_python(harness)
+    return rc == 0
+
+
+def _run_python(code: str) -> Tuple[int, str, str]:
+    """Run python code in a temp file. Returns (returncode, stdout, stderr)."""
+    with tempfile.TemporaryDirectory() as td:
+        path = Path(td) / "prog.py"
+        path.write_text(code, encoding="utf-8")
+        try:
+            p = subprocess.run(
+                [sys.executable, str(path)],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=6.0,
+            )
+            return p.returncode, p.stdout.decode("utf-8", "replace"), p.stderr.decode("utf-8", "replace")
+        except subprocess.TimeoutExpired as e:
+            out = (e.stdout or b"").decode("utf-8", "replace")
+            err = (e.stderr or b"").decode("utf-8", "replace")
+            return 124, out, err
+
+
 def run_property_test_experiment():
+
+    # set up OpenAI client
+    OPEN_AI_KEY_FILEPATH = "../open-ai-key.txt"
+    with open(OPEN_AI_KEY_FILEPATH, 'r') as file:
+        open_ai_key = file.read().strip()  # Reads the entire file content as a single string
+        client = OpenAI(
+            api_key=open_ai_key
+        )
+
     args = get_args()
 
     random.seed(123)
@@ -911,10 +1055,38 @@ def run_property_test_experiment():
     with open(input_path, "r", encoding="utf-8") as f:
         input_tasks = json.load(f)
 
-    # for each benchmark:
-    # 1. generate property-based tests from question_content using LLM (zero-shot)
-    # 2. check if the property-based tests pass the positive solutions and fail the negative solutions
-    # 3. get f1 score
+
+    model_to_f1_score = {}
+    models =  [
+        "gpt-4o-2024-08-06",
+        # "gpt-5.2",
+        # "gpt-4.1"
+    ]
+
+    for model_name in models:
+        y_true = []
+        y_pred = []
+        for task in input_tasks:
+            prompt = task["question_content"]
+            # generate property-based tests from question_content using LLM (zero-shot)
+            property_tests_code = generate_property_tests(client, prompt, model_name)
+            y_true += [1 for _ in task["positives"]] 
+            y_true += [0 for _ in task["negatives"]]
+            y_pred = []
+            for sol_code in task["positives"] + task["negatives"]:
+                ok = solution_passes_property_tests(sol_code, property_tests_code)
+                y_pred.append(1 if ok else 0) 
+
+        score = f1_score(y_true, y_pred, average='binary')
+        model_to_f1_score[model_name] = score
+
+    # write results to_csv
+    results_file = "./output/property_test_experiment_results.csv"
+    with open(results_file, mode='w', newline='') as file:
+        writer = csv.writer(file)
+        # Write all rows at once
+        writer.writerow(["Model Name", "Property-Based Test F1 Score"])
+        writer.writerows(list(model_to_f1_score))
 
 
 if __name__ == "__main__":

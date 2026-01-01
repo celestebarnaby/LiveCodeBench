@@ -177,5 +177,6 @@ class BaseRunner(ABC):
         prompts = [
             format_prompt(problem, self.model.model_style) for problem in benchmark
         ]
+        # raise TypeError
         outputs = self.prompts_to_outputs(prompts)
         return outputs
