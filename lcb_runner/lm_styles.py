@@ -287,6 +287,13 @@ LanguageModelList: list[LanguageModel] = [
         datetime(2023, 4, 30),
         link="https://openai.com/index/spring-update",
     ),
+    LanguageModel(
+        "gpt-5.1",
+        "GPT-5.1",
+        LMStyle.OpenAIChat,
+        datetime(2026, 1, 7),
+        link="https://openai.com/index/spring-update",
+    ),
     ## O1-Mini and O1-Preview
     LanguageModel(
         "o1-preview-2024-09-12",

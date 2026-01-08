@@ -46,7 +46,7 @@ class OpenAIRunner(BaseRunner):
             self.client_kwargs: dict[str | str] = {
                 "model": args.model,
                 "temperature": args.temperature,
-                "max_tokens": args.max_tokens,
+                "max_completion_tokens": args.max_tokens,
                 "top_p": args.top_p,
                 "frequency_penalty": 0,
                 "presence_penalty": 0,

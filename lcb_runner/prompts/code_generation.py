@@ -9,6 +9,8 @@ except ImportError:
 from lcb_runner.lm_styles import LMStyle
 from lcb_runner.benchmarks.code_generation import CodeGenerationProblem
 
+from lcb_runner.utils.extraction_utils import WRAPPER
+
 
 class PromptConstants:
     SYSTEM_MESSAGE_GENERIC = f"You are an expert Python programmer. You will be given a question (problem specification) and will generate a correct Python program that matches the specification and passes all tests."
@@ -36,15 +38,17 @@ class PromptConstants:
 
     # FORMATTING_WITHOUT_STARTER_CODE = "Read the inputs from stdin solve the problem and write the answer to stdout (do not directly test on the sample inputs). Enclose your code within delimiters as follows. Ensure that when the python program runs, it reads the inputs, runs the algorithm and writes output to STDOUT."
     FORMATTING_WITHOUT_STARTER_CODE = (
-"Write a pure function `solve_task`.\n"
+"Implement `solve_task` here:\n"
+"{template}"
 "- Do NOT read from stdin, do NOT write to stdout, do NOT call `solve_task`.\n"
 "- No top-level side effects (no global execution).\n"
-"- Assume the input is a single test case."
+"- Assume the input is a single test case.\n"
 "- Return the exact output.\n"
 "- You may define helper functions, but `solve_task` must be the public entry point."
-    )
+)
+    #.format(WRAPPER.format(model_code=""))
 
-def get_generic_question_template_answer(question: CodeGenerationProblem):
+def get_generic_question_template_answer(question: CodeGenerationProblem, parse_input_impl):
     prompt = f"### Question:\n{question.question_content}\n\n"
     # if question.starter_code:
     # TODO: decide what to do for benchmarks with starter code
@@ -54,7 +58,16 @@ def get_generic_question_template_answer(question: CodeGenerationProblem):
         )
         prompt += f"```python\n{question.starter_code}\n```\n\n"
     else:
-        prompt += f"### Format: {PromptConstants.FORMATTING_WITHOUT_STARTER_CODE}\n"
+        template = WRAPPER.format(
+            model_code="",
+            parse_input_impl=parse_input_impl
+        )
+
+        formatted = PromptConstants.FORMATTING_WITHOUT_STARTER_CODE.format(
+            template=template
+        )
+
+        prompt += f"### Format: {formatted}\n"
         prompt += "```python\n# YOUR CODE HERE\n```\n\n"
     prompt += f"### Answer: (use the provided format with backticks)\n\n"
     return prompt
@@ -216,7 +229,7 @@ def get_base_model_question_template_answer(question: CodeGenerationProblem):
 
 
 def format_prompt_generation(
-    question: CodeGenerationProblem, LanguageModelStyle: LMStyle
+    question: CodeGenerationProblem, LanguageModelStyle: LMStyle, parse_input_impl
 ) -> str:
     if LanguageModelStyle in [
         LMStyle.OpenAIChat,
@@ -233,7 +246,7 @@ def format_prompt_generation(
         chat_messages += [
             {
                 "role": "user",
-                "content": get_generic_question_template_answer(question),
+                "content": get_generic_question_template_answer(question, parse_input_impl),
             },
         ]
         return chat_messages

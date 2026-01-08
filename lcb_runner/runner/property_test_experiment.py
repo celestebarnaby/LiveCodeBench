@@ -44,25 +44,18 @@ class EvalResult:
     error_detail: Optional[str] = None
 
 
-WRAPPER = """\
-import sys
-{model_code}
-
-def _main():
-    sys.stdout.write(solve_io(sys.stdin.read()))
-
-if __name__ == "__main__":
-    _main()
-"""
-
-
-def extract_property_test_benchmarks():
+def get_code_solutions_for_benchmarks(client):
+    '''
+    This script enumerates LCB benchmarks and generates code solutions via LLM prompting.
+    The generated solutions are then saved. 
+    '''
     args = get_args()
 
     model = LanguageModelStore[args.model]
     benchmarks, format_prompt = build_prompt_benchmark(args)
 
     benchmarks = benchmarks[:10]
+    # random.shuffle(benchmarks)
     # NUM_BENCHMARKS = 10
     # random.seed(123)
     # benchmarks = random.sample(benchmarks, NUM_BENCHMARKS)
@@ -71,15 +64,40 @@ def extract_property_test_benchmarks():
     if os.path.exists(output_path):
         os.remove(output_path)
 
-    runner = build_runner(args, model)
-    # TODO: add I/O wrapper to results
-    results: list[list[str]] = runner.run_main(benchmarks, format_prompt)
-    print(results[0])
+    # ---- Generate parse_input for each benchmark ----
+    print("generating parse_input functions...")
+    # parse_inputs_by_qid = {}
+    # parse_errors_by_qid = {}
+    parse_inputs_list = []
 
+    for instance in tqdm(benchmarks):
+        qid = instance.question_id
+        # try:
+        parse_code = get_parse_input(instance.question_content, client, args.model)
+        parse_inputs_list.append(parse_code)
+
+        # also write to a file for inspection
+        # parse_path = f"output/parse_input/{qid}_parse_input.py"
+        # with open(parse_path, "w", encoding="utf-8") as f:
+        #     f.write(f"'''\n{instance.question_content}\n'''\n\n")
+        #     f.write(parse_code)
+        # except Exception as e:
+        #     parse_errors_by_qid[qid] = str(e)
+        #     parse_inputs_list.append("")
+
+    # ---- Existing generation pipeline for code solutions ----
+
+    print("get results")
+    runner = build_runner(args, model)
+
+    results: list[list[str]] = runner.run_main(benchmarks, format_prompt, parse_inputs_list)
+
+    print("combine results")
     combined_results = combine_results(
-        args.scenario, results, model, args.cot_code_execution
+        args.scenario, results, parse_inputs_list, model, args.cot_code_execution
     )
 
+    print("save results")
     save_results = [
         instance.insert_output(outputs_list, extracted_list)
         for instance, (outputs_list, extracted_list) in zip(
@@ -91,17 +109,18 @@ def extract_property_test_benchmarks():
         args.scenario, save_results
     )
 
+    print("get metrics")
     metrics = get_metrics(args.scenario, args, benchmarks, combined_results)
     graded = extract_instance_results(metrics[1])
 
     metadatas = metrics[2]
 
-    # for instance, (_, extracted_list), graded_list, meta in zip(benchmarks, combined_results, graded, metadatas):
-        # for i, (extracted_code, code_grade, code_meta) in enumerate(zip(extracted_list, graded_list, meta)):
-            # path = f"output/generated_code/{instance.question_id}_{i}_code.py"
-            # with open(path, "w") as f:
-            #     f.write(f"'''\n{instance.question_content}\n\npassed: {code_grade}\n\nmetadata: {code_meta}\n'''\n\n")
-            #     f.write(extracted_code)
+    for instance, (_, extracted_list), graded_list, meta in zip(benchmarks, combined_results, graded, metadatas):
+        for i, (extracted_code, code_grade, code_meta) in enumerate(zip(extracted_list, graded_list, meta)):
+            path = f"output/generated_code/{instance.question_id}_{i}_code.py"
+            with open(path, "w") as f:
+                f.write(f"'''\n{instance.question_content}\n\npassed: {code_grade}\n\nmetadata: {code_meta}\n'''\n\n")
+                f.write(extracted_code)
 
     save_eval_results = [
         instance.insert_output_evaluation(
@@ -112,297 +131,43 @@ def extract_property_test_benchmarks():
         )
     ]
 
+    # save_eval_results = [item for item in save_eval_results if item["pass@1"] > 0]
+    # print(f"Saved results for {len(save_eval_results)} benchmarks")
+
     with open(output_path, "w") as f:
         json.dump(save_eval_results, f, indent=4)
 
-def main():
-    args = get_args()
 
-    model = LanguageModelStore[args.model]
-    benchmark, format_prompt = build_prompt_benchmark(args)
-    if args.debug:
-        print(f"Running with {len(benchmark)} instances in debug mode")
-        benchmark = benchmark[:15]
+def get_parse_input(task_description, client, model_name):
+    prompt = f"""\
+You are an expert Python programmer.
 
-    benchmark = benchmark[:15]
-    # NUM_BENCHMARKS = 10
-    # random.seed(123)
-    # benchmark = random.sample(benchmark, NUM_BENCHMARKS)
-    # benchmark = benchmark[:NUM_BENCHMARKS]
+Given the following competitive programming problem statement, write Python code that defines:
 
-    output_path = get_output_path(model.model_repr, args)
-    eval_file = output_path.replace(".json", "_eval.json")
-    eval_all_file = output_path.replace(".json", "_eval_all.json")
+- def parse_input(stdin: str) -> list[tuple]:
+    * stdin is the full contents of standard input as a single string.
+    * Return a list of test cases.
+    * Each test case MUST be represented as a tuple containing only JSON-serializable primitives
+      (int, str, bool) and lists of those primitives (no custom classes).
+    * If the input has t test cases, the returned list MUST have length t.
+    * Do NOT read from stdin, do NOT write to stdout.
+    * No top-level side effects.
 
-    # if args.continue_existing or args.continue_existing_with_eval:
-    #     if os.path.exists(output_path):
-    #         with open(output_path, "r") as f:
-    #             old_save_results = json.load(f)
-    #     elif os.path.exists(eval_all_file):
-    #         with open(eval_all_file, "r") as f:
-    #             old_save_results = json.load(f)
-    #     else:
-    #         print(
-    #             f"File {output_path} does not exist in --continue_existing, starting from scratch"
-    #         )
-    #         old_save_results = []
+Problem statement:
+{task_description}
 
-    #     old_save_results = [
-    #         instance
-    #         for instance in old_save_results
-    #         if instance["output_list"] and [x for x in instance["output_list"] if x]
-    #     ]
-    #     old_save_results_question_ids = [
-    #         instance["question_id"] for instance in old_save_results
-    #     ]
-    #     remaining_benchmark = [
-    #         instance
-    #         for instance in benchmark
-    #         if instance.question_id not in old_save_results_question_ids
-    #     ]
-    #     print(
-    #         f"Found {len(old_save_results)} existing generations, continuing with {len(remaining_benchmark)} remaining"
-    #     )
-    # else:
-    if True:
-        old_save_results = []
-        remaining_benchmark = benchmark
+Return ONLY valid Python code. Do NOT return any code other than the parse_input implementation. Do not include explanations.
+"""
 
-    if len(remaining_benchmark) > 0:
-        runner = build_runner(args, model)
-        results: list[list[str]] = runner.run_main(remaining_benchmark, format_prompt)
-    else:
-        results = []
-
-    combined_results = combine_results(
-        args.scenario, results, model, args.cot_code_execution
+    response = client.chat.completions.create(
+        model=model_name,
+        messages=[
+            {"role": "user", "content": prompt},
+        ],
+        temperature=0,
+        max_completion_tokens=800,  # parsers can be a bit longer than 512
     )
-
-    save_results = [
-        instance.insert_output(outputs_list, extracted_list)
-        for instance, (outputs_list, extracted_list) in zip(
-            remaining_benchmark, combined_results
-        )
-    ]
-
-    # TODO: where do we run/test the generated code?
-
-    if args.continue_existing or args.continue_existing_with_eval:
-        save_results += old_save_results
-
-    save_results, combined_results = sort_and_extract_save_results(
-        args.scenario, save_results
-    )
-
-    with open(output_path, "w") as f:
-        json.dump(save_results, f, indent=4)
-
-
-    if args.evaluate:
-        if args.continue_existing_with_eval and os.path.exists(eval_all_file):
-            with open(eval_all_file) as fp:
-                old_eval_all_results = json.load(fp)
-
-            if os.path.exists(eval_file):
-                with open(eval_file) as fp:
-                    old_eval_results = json.load(fp)
-            else:
-                old_eval_results = None
-
-            old_eval_results_question_ids = [
-                instance["question_id"] for instance in old_eval_all_results
-            ]
-            remaining_indices = [
-                idx
-                for idx in range(len(benchmark))
-                if benchmark[idx].question_id not in old_eval_results_question_ids
-            ]
-            benchmark = [benchmark[idx] for idx in remaining_indices]
-            combined_results = [combined_results[idx] for idx in remaining_indices]
-
-            old_eval_size = len(old_eval_results_question_ids)
-            new_eval_size = len(benchmark)
-
-            if new_eval_size == 0:
-                return
-
-            print(f"Found {old_eval_size}, running evals for {new_eval_size} problems")
-
-            metrics = get_metrics(args.scenario, args, benchmark, combined_results)
-            graded = extract_instance_results(metrics[1])
-
-            if old_eval_results:
-                for key in metrics[0]:
-                    if key in old_eval_results[0]:
-                        if key != "detail":
-                            metrics[0][key] = (
-                                old_eval_size * old_eval_results[0][key]
-                                + new_eval_size * metrics[0][key]
-                            )
-                            metrics[0][key] /= old_eval_size + new_eval_size
-
-                for key in metrics[0]["detail"]:
-                    if key in old_eval_results[0]["detail"]:
-                        metrics[0]["detail"][key] = {
-                            **metrics[0]["detail"][key],
-                            **old_eval_results[0]["detail"][key],
-                        }
-                metrics[1] = {**metrics[1], **old_eval_results[1]}
-            else:
-                print("Old eval file not present, cannot update eval file")
-                metrics = {}
-
-        else:
-            metrics = get_metrics(args.scenario, args, benchmark, combined_results)
-            graded = extract_instance_results(metrics[1])
-            old_eval_all_results = []
-            old_eval_results = []
-
-        if args.scenario == Scenario.codegeneration:
-            if metrics:
-                metadatas = metrics[2]
-            else:
-                metadatas = [[] for _ in benchmark]
-            save_eval_results = [
-                instance.insert_output_evaluation(
-                    outputs_list, extracted_list, graded_list, metadata=meta
-                )
-                for instance, (outputs_list, extracted_list), graded_list, meta in zip(
-                    benchmark, combined_results, graded, metadatas
-                )
-            ]
-            if metrics and old_eval_results:
-                old_eval_results
-                metrics[2] = old_eval_results[2] + metrics[2]
-        elif args.scenario == Scenario.selfrepair:
-            metadatas = metrics[2]
-            with open(
-                f"output/{model.model_repr}/{Scenario.codegeneration}_{args.codegen_n}_{args.temperature}_eval_all.json"
-            ) as f:
-                code_gen_evals = json.load(f)
-            original_code_lists = [
-                code_gen_eval["code_list"] for code_gen_eval in code_gen_evals
-            ]
-
-            save_eval_results = [
-                instance.insert_output_evaluation(
-                    outputs_list,
-                    extracted_list,
-                    graded_list,
-                    metadata=meta,
-                    original_code_list=original_code_list,
-                )
-                for instance, (
-                    outputs_list,
-                    extracted_list,
-                ), graded_list, meta, original_code_list in zip(
-                    benchmark, combined_results, graded, metadatas, original_code_lists
-                )
-            ]
-
-        else:
-            save_eval_results = [
-                instance.insert_output_evaluation(
-                    outputs_list, extracted_list, graded_list
-                )
-                for instance, (outputs_list, extracted_list), graded_list in zip(
-                    benchmark, combined_results, graded
-                )
-            ]
-
-        save_eval_results = old_eval_all_results + save_eval_results
-
-        with open(eval_file, "w") as f:
-            json.dump(metrics, f, indent=4)
-
-        with open(eval_all_file, "w") as f:
-            json.dump(save_eval_results, f, indent=4)
-
-
-
-# def test() -> None:
-#     args = get_args
-
-#     # Import here to avoid hard dependency errors if user just wants to inspect code.
-#     from datasets import load_dataset
-
-#     ds = load_dataset(args.dataset, version_tag=args.version_tag)
-#     # pick a split
-#     if args.split:
-#         data = ds[args.split]
-#     else:
-#         # common: only one split
-#         split0 = list(ds.keys())[0]
-#         data = ds[split0]
-
-#     llm_map = load_llm_solutions_jsonl(args.llm_solutions_jsonl)
-
-#     out_records: List[Dict[str, Any]] = []
-#     n = len(data) if args.max_tasks is None else min(len(data), args.max_tasks)
-
-#     for idx in range(n):
-#         item = dict(data[idx])
-
-#         qid_key, qid = first_present(item, ["question_id", "id", "task_id"])
-#         if qid is None:
-#             # fallback: stable-ish synthetic id
-#             qid = f"idx_{idx}"
-
-#         _, desc = first_present(item, ["question_content", "prompt", "description", "problem_statement"])
-#         desc = desc if desc is not None else ""
-
-#         # test cases
-#         _, public_tc_raw = first_present(item, ["public_test_cases", "public_tests", "public_testcases", "public"])
-#         _, private_tc_raw = first_present(item, ["private_test_cases", "private_tests", "private_testcases", "private"])
-#         public_tcs = parse_testcases(public_tc_raw)
-#         private_tcs = parse_testcases(private_tc_raw)
-
-#         # "gold" solution (usually not present in LCB releases; we keep it nullable)
-#         _, gold = first_present(item, ["reference_solution", "canonical_solution", "gold_solution", "solution"])
-#         if gold is not None and not isinstance(gold, str):
-#             gold = str(gold)
-
-#         # LLM solutions (expect 10)
-#         llm_solutions = llm_map.get(str(qid), [])
-#         if len(llm_solutions) != 10:
-#             # Keep going, but record what you actually have.
-#             pass
-
-#         sol_results = []
-#         for s_i, sol in enumerate(llm_solutions):
-#             try:
-#                 r = evaluate_solution(item, sol, timeout_s=args.timeout_s)
-#                 sol_results.append({
-#                     "index": s_i,
-#                     "code": sol,
-#                     "passed": r.passed,
-#                     "n_tests_run": r.n_tests_run,
-#                     "n_tests_total": r.n_tests_total,
-#                     "failure": r.failure,
-#                 })
-#             except Exception as e:
-#                 sol_results.append({
-#                     "index": s_i,
-#                     "code": sol,
-#                     "passed": False,
-#                     "n_tests_run": 0,
-#                     "n_tests_total": len(public_tcs) + len(private_tcs),
-#                     "failure": f"Evaluator exception: {type(e).__name__}: {e}",
-#                 })
-
-#         out_records.append({
-#             "question_id": qid,
-#             "nl_description": desc,
-#             "public_test_case_inputs": [tc.get("input", tc.get("stdin", tc.get("in"))) for tc in public_tcs],
-#             "private_test_case_inputs": [tc.get("input", tc.get("stdin", tc.get("in"))) for tc in private_tcs],
-#             "gold_code_solution": gold,  # likely null for official LCB datasets
-#             "llm_solutions": sol_results,
-#         })
-
-#     with open(args.out, "w", encoding="utf-8") as f:
-#         json.dump(out_records, f, ensure_ascii=False, indent=2)
-
-#     print(f"Wrote {len(out_records)} tasks to {args.out}")
+    return strip_code_fences(response.choices[0].message.content)
 
 
 def load_lcb_index(args):
@@ -466,10 +231,11 @@ def call_openai_code_mutator(
 SEED SOLUTION (for reference only; do NOT copy large chunks verbatim):
 {seed_code}
 
-Rewrite the solution so it is substantially different in structure and style, while remaining correct.
+Rewrite the `solve_task` function so it is substantially different in structure and style, while remaining correct.
 Constraints:
 - Output ONLY Python code.
-- Must read from stdin and write to stdout.
+- ONLY modify the `solve_task` function.
+- Include the rest of the seed solution unchanged in your output.
 - Must be meaningfully different (not simple renaming). 
 - For example, {style}.
 """
@@ -495,14 +261,15 @@ Constraints:
 SEED SOLUTION (reference; do NOT copy large chunks verbatim):
 {seed_code}
 
-Write a NEW Python solution that looks plausible and is syntactically valid, but is subtly incorrect.
+Change the `solve_task` function so that it looks plausible and is syntactically valid, but is subtly incorrect.
 It MUST:
-- Read stdin and write stdout correctly (no crashes, no infinite loops).
 - Be meaningfully different than the seed (not just renaming). For instance, {style}.
 - For example, the solution may have one of the following types of bugs: {bugs}.
 - Likely passes many basic cases but fails at least one edge case.
-
-Output ONLY Python code.
+Contraints:
+- Output ONLY Python code.
+- ONLY modify the `solve_task` function.
+- Include the rest of the seed solution unchanged in your output.
 """
 
     # Use Responses API (recommended)
@@ -826,10 +593,16 @@ def write_task_fuzzed_files(qid: str, question_content: str, task_result: dict) 
 
 
 CODE_PATH = "output/code"
+OPEN_AI_KEY_FILEPATH = "../open-ai-key.txt"
 
-def extract_property_test_benchmarks2() -> None:
+def generate_property_test_benchmarks() -> None:
+    '''
+    This script takes the generated code solutions for the benchmarks,
+    and fuzzes them to generate a set of positive and negative solutions.
+    These are our benchmarks for our property-based tests.
+    '''
+
     # set up OpenAI client
-    OPEN_AI_KEY_FILEPATH = "../open-ai-key.txt"
     with open(OPEN_AI_KEY_FILEPATH, 'r') as file:
         open_ai_key = file.read().strip()  # Reads the entire file content as a single string
         client = OpenAI(
@@ -894,9 +667,14 @@ def extract_property_test_benchmarks2() -> None:
         curated.append(benchmark_res)
         write_task_fuzzed_files(qid, nl_prompt, benchmark_res)
 
+    if len(curated) == 0:
+        print("No benchmarks generated....")
+        raise TypeError
 
+    # each negative solution has its own pass rate
     pass_rate_lists = [item["pass_fractions"] for item in curated]
     avg_pass_rate = statistics.mean([item for sublist in pass_rate_lists for item in sublist])
+    # each benchmark has its own failure coverage (across all negative solutions)
     avg_failure_coverage = statistics.mean([item["failure_coverage"] for item in curated])
 
     output = {
@@ -914,6 +692,8 @@ def extract_property_test_benchmarks2() -> None:
         json.dump(output, f, ensure_ascii=False, indent=2)
 
     print(f"Wrote {len(curated)} benchmarks to {output_path}")
+    print(f"Average unit test pass rate (higher is better): {avg_pass_rate}")
+    print(f"Average unit test failure coverage (higher is better): {avg_failure_coverage}")
 
 
 def generate_property_tests(client, prompt: str, model_name: str) -> str:
@@ -1037,7 +817,6 @@ def _run_python(code: str) -> Tuple[int, str, str]:
 def run_property_test_experiment():
 
     # set up OpenAI client
-    OPEN_AI_KEY_FILEPATH = "../open-ai-key.txt"
     with open(OPEN_AI_KEY_FILEPATH, 'r') as file:
         open_ai_key = file.read().strip()  # Reads the entire file content as a single string
         client = OpenAI(
@@ -1058,7 +837,7 @@ def run_property_test_experiment():
 
     model_to_f1_score = {}
     models =  [
-        "gpt-4o-2024-08-06",
+        "gpt-5-mini",
         # "gpt-5.2",
         # "gpt-4.1"
     ]
@@ -1091,6 +870,13 @@ def run_property_test_experiment():
 
 if __name__ == "__main__":
     # main()
-    extract_property_test_benchmarks()
-    extract_property_test_benchmarks2()
-    run_property_test_experiment()
+
+    with open(OPEN_AI_KEY_FILEPATH, 'r') as file:
+        open_ai_key = file.read().strip()  # Reads the entire file content as a single string
+        client = OpenAI(
+            api_key=open_ai_key
+        )
+
+    get_code_solutions_for_benchmarks(client)
+    generate_property_test_benchmarks()
+    # run_property_test_experiment()

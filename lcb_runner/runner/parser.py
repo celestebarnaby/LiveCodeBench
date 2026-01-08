@@ -47,12 +47,12 @@ def get_args():
         help="whether to use CoT in code execution scenario",
     )
     parser.add_argument(
-        "--n", type=int, default=10, help="Number of samples to generate"
+        "--n", type=int, default=8, help="Number of samples to generate"
     )
     parser.add_argument(
         "--codegen_n",
         type=int,
-        default=10,
+        default=8,
         help="Number of samples for which code generation was run (used to map the code generation file during self-repair)",
     )
     parser.add_argument(

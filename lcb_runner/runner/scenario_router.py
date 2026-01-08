@@ -83,6 +83,7 @@ def build_prompt_benchmark(
 def combine_results(
     scenario: Scenario,
     results: list[list[str]],
+    parse_inputs_list,
     model: LanguageModel,
     cot_code_execution: bool = False,
 ):
@@ -90,9 +91,9 @@ def combine_results(
         combined_results = [
             (
                 outputs_list,
-                [extract_code(output, model.model_style) for output in outputs_list],
+                [extract_code(output, model.model_style, parse_inputs_impl) for output in outputs_list],
             )
-            for outputs_list in results
+            for outputs_list, parse_inputs_impl in zip(results, parse_inputs_list)
         ]
     elif scenario == Scenario.testoutputprediction:
         combined_results = [

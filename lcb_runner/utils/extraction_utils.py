@@ -1,20 +1,41 @@
 from lcb_runner.lm_styles import LMStyle
 
 
-def extract_code(model_output: str, lmstyle: LMStyle):
+WRAPPER = """\
+import sys
+
+
+# TODO: IMPLEMENT solve_task FUNCTION HERE
+{model_code}
+
+{parse_input_impl}
+
+def _main():
+    stdin = sys.stdin.read()
+    cases = parse_input(stdin)
+    out = [str(solve_task(case)) for case in cases]
+    sys.stdout.write("\\n".join(out) + "\\n")
+
+if __name__ == "__main__":
+    _main()
+"""
+
+def extract_code(model_output: str, lmstyle: LMStyle, parse_input_impl):
     outputlines = model_output.split("\n")
     if lmstyle == LMStyle.CodeLLaMaInstruct:
         indexlines = [i for i, line in enumerate(outputlines) if "PYTHON]" in line]
         if len(indexlines) < 2:
             indexlines = [i for i, line in enumerate(outputlines) if "```" in line]
     elif lmstyle == LMStyle.GenericBase:
+        raise TypeError
         return model_output.strip()
     else:
         indexlines = [i for i, line in enumerate(outputlines) if "```" in line]
         if len(indexlines) < 2:
             return ""
         # return "\n".join(outputlines[indexlines[0] + 1 : indexlines[1]])
-        return "\n".join(outputlines[indexlines[-2] + 1 : indexlines[-1]])
+        code = "\n".join(outputlines[indexlines[-2] + 1 : indexlines[-1]])
+        return WRAPPER.format(model_code=code, parse_input_impl=parse_input_impl)
 
 
 def extract_test_output_code(model_output: str, lmstyle: LMStyle = None):
